@@ -1,0 +1,19 @@
+# dsh-boot-animation-sound —— DSH bundle patch
+#
+# 挂载声明。profile 把本包列进 package.json 的 dsh.profile.bundles 之后，
+# 这一行 insert 会把插件推进 profile 的配置树。
+#
+# 想改默认值就覆盖 config（只写想改的字段；设置页里改过的项会盖在上面）：
+#
+#   - id: dsh-boot-animation-sound
+#     name: dsh-boot-animation-sound
+#     config:
+#       src: D:/videos/boot.mp4
+#       sound: true
+#       volume: 0.9
+#       fit: cover
+#       skip: button
+
+- insert:
+    - id: dsh-boot-animation-sound
+      name: dsh-boot-animation-sound

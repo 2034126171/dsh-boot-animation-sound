@@ -1,0 +1,71 @@
+{
+  "name": "dsh-boot-animation-sound",
+  "version": "1.0.0",
+  "description": "DSH 开机动画：启动时铺满窗口播放一段视频，声音不需要全屏。先试带声音起播，被系统拦下时点一下窗口任意位置即开声，窗口大小始终不变。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "cordis",
+    "boot-animation",
+    "startup-animation",
+    "splash",
+    "sound",
+    "audio",
+    "autoplay"
+  ],
+  "license": "MIT",
+  "author": "2034126171",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json",
+    "./cordis.patch.yml": "./cordis.patch.yml"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "media",
+    "cordis.patch.yml",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "verify"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "verify": "node verify/check-media.mjs && node verify/host-verify.mjs && node verify/client-smoke.mjs",
+    "verify:media": "node verify/check-media.mjs",
+    "verify:host": "node verify/host-verify.mjs",
+    "verify:client": "node verify/client-smoke.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/2034126171/dsh-boot-animation-sound.git"
+  },
+  "homepage": "https://github.com/2034126171/dsh-boot-animation-sound#readme",
+  "bugs": {
+    "url": "https://github.com/2034126171/dsh-boot-animation-sound/issues"
+  },
+  "meta": {
+    "title": "开机动画（免全屏出声）",
+    "description": "启动时播放一段视频。声音不需要全屏：能直接出声就直接出声，被拦下时点一下窗口任意位置即开声，窗口大小不变。"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    },
+    "engines": {
+      "dsh": ">=0.2.0-rc.1"
+    }
+  }
+}

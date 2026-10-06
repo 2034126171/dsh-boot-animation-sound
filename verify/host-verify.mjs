@@ -1,0 +1,372 @@
+/**
+ * dsh-boot-animation-sound — verification.
+ *
+ * Runs the SHIPPED host half against a temporary DSH home and a fake Cordis
+ * context, drives every HTTP route it registers, and then asserts the one thing
+ * this package exists for: that turning the sound on cannot reach
+ * `requestFullscreen()`.
+ *
+ * No dependencies, no DSH, no browser. `node verify/host-verify.mjs`.
+ */
+
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Readable, Writable } from 'node:stream'
+import { once } from 'node:events'
+import { fileURLToPath } from 'node:url'
+
+import {
+  BUNDLED_MEDIA,
+  CONFIG_ROUTE,
+  DEFAULTS,
+  MEDIA_ROUTE,
+  REPORT_ROUTE,
+  SAVE_ROUTE,
+  apply,
+  normalizeConfig,
+  resolveMedia,
+} from '../index.js'
+
+const PACKAGE_DIR = fileURLToPath(new URL('..', import.meta.url))
+const CLIENT = readFileSync(join(PACKAGE_DIR, 'client.js'), 'utf8')
+const MANIFEST = JSON.parse(readFileSync(join(PACKAGE_DIR, 'package.json'), 'utf8'))
+
+let failures = 0
+let checks = 0
+
+/** @param name - what is being asserted. @param ok - the verdict. @param detail - extra context on failure. */
+function check(name, ok, detail) {
+  checks += 1
+  if (ok) {
+    console.log(`  PASS  ${name}`)
+    return
+  }
+  failures += 1
+  console.log(`  FAIL  ${name}${detail === undefined ? '' : `  (${detail})`}`)
+}
+
+/** @param name - what is being asserted. @param actual - observed value. @param expected - required value. */
+function equal(name, actual, expected) {
+  check(name, actual === expected, `expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`)
+}
+
+/** A response double: records the status, the headers and the body bytes. */
+class FakeResponse extends Writable {
+  constructor() {
+    super()
+    this.status = 0
+    this.headers = {}
+    this.chunks = []
+  }
+
+  writeHead(status, headers) {
+    this.status = status
+    this.headers = headers ?? {}
+    return this
+  }
+
+  _write(chunk, _encoding, callback) {
+    this.chunks.push(Buffer.from(chunk))
+    callback()
+  }
+
+  /** @returns every byte written to this response. */
+  body() {
+    return Buffer.concat(this.chunks)
+  }
+}
+
+/**
+ * Mount the Host half with a recording Cordis context.
+ * @param config - the profile patch config.
+ * @param dshHome - the DSH home this instance believes in.
+ * @param options - the test seams `apply` accepts.
+ * @returns the recorded routes, index-inject handlers and log lines.
+ */
+function mount(config, dshHome, options) {
+  const previousHome = process.env.DSH_HOME
+  process.env.DSH_HOME = dshHome
+  const routes = []
+  const injections = []
+  const logs = []
+  const ctx = {
+    logger: {
+      info: (message) => logs.push(['info', message]),
+      warn: (message) => logs.push(['warn', message]),
+      error: (message) => logs.push(['error', message]),
+    },
+    on(name, handler) {
+      if (name === 'webserver/index-inject') injections.push(handler)
+    },
+    inject(names, callback) {
+      callback({
+        get: () => undefined,
+        effect: (run) => run(),
+        webServer: {
+          register: (route) => {
+            routes.push(route)
+            return () => {}
+          },
+        },
+      })
+    },
+  }
+  apply(ctx, config, options)
+  if (previousHome === undefined) delete process.env.DSH_HOME
+  else process.env.DSH_HOME = previousHome
+  return { routes, injections, logs }
+}
+
+/** @returns the registered route whose path matches. */
+function route(routes, path, kind = 'exact') {
+  const found = routes.find((candidate) => candidate.path === path && candidate.kind === kind)
+  if (found === undefined) throw new Error(`no ${kind} route registered for ${path}`)
+  return found
+}
+
+/**
+ * Invoke one route handler with a fake request and response.
+ * @returns the status, headers, raw body and parsed JSON when it was JSON.
+ */
+async function call(target, { method = 'GET', path = target.path, headers = {}, body } = {}) {
+  const payload = body === undefined ? '' : JSON.stringify(body)
+  const req = Readable.from(payload === '' ? [] : [Buffer.from(payload)])
+  req.method = method
+  req.url = path
+  req.headers = { ...headers }
+  const res = new FakeResponse()
+  const finished = once(res, 'finish')
+  target.handler(req, res)
+  await Promise.race([
+    finished,
+    new Promise((_resolve, reject) => setTimeout(() => reject(new Error('the handler never ended the response')), 5000)),
+  ])
+  let json = null
+  try {
+    json = JSON.parse(res.body().toString('utf8'))
+  } catch { /* a media response is not JSON, which is expected */ }
+  return { status: res.status, headers: res.headers, body: res.body(), json }
+}
+
+const home = mkdtempSync(join(tmpdir(), 'dbas-verify-'))
+
+try {
+  console.log('\n[1] defaults and coercion')
+  const defaults = normalizeConfig({})
+  equal('sound defaults to ON (the switch this plugin exists for)', defaults.sound, true)
+  equal('volume default', defaults.volume, 0.9)
+  equal('skip default', defaults.skip, 'button')
+  equal('coverApplication default', defaults.coverApplication, true)
+  equal('showFullscreenButton defaults to OFF', defaults.showFullscreenButton, false)
+  equal('soundOnFirstInput default', defaults.soundOnFirstInput, true)
+  equal('src stays undefined so the bundled clip can apply', defaults.src, undefined)
+  equal('junk sound falls back rather than enabling anything odd', normalizeConfig({ sound: 'yes' }).sound, true)
+  equal('sound:false is honoured', normalizeConfig({ sound: false }).sound, false)
+  equal('volume is clamped', normalizeConfig({ volume: 5 }).volume, 1)
+  equal('unknown skip mode falls back', normalizeConfig({ skip: 'nope' }).skip, 'button')
+  equal('junk background falls back', normalizeConfig({ background: 'red' }).background, DEFAULTS.background)
+  equal('src is preserved as a string', normalizeConfig({ src: 'D:/v/a.mp4' }).src, 'D:/v/a.mp4')
+  equal('cleared src stays the empty string', normalizeConfig({ src: '' }).src, '')
+
+  console.log('\n[2] media resolution')
+  const bundled = resolveMedia(undefined, home)
+  check('never chosen resolves to the bundled clip', bundled.configured === true && bundled.source === 'bundled', JSON.stringify(bundled))
+  check('the bundled clip exists in the package', existsSync(BUNDLED_MEDIA), BUNDLED_MEDIA)
+  check('the bundled clip is playable video', resolveMedia(undefined, home).kind === 'video')
+  const cleared = resolveMedia('', home)
+  check('a cleared path means "play nothing" and never falls back', cleared.configured === false && cleared.source === 'cleared', JSON.stringify(cleared))
+  const missing = resolveMedia('D:/nope/missing.mp4', home)
+  equal('a missing file is reported as such', missing.problem, 'missing-file')
+  const junk = join(home, 'notes.txt')
+  writeFileSync(junk, 'not a video')
+  equal('an unsupported extension is reported', resolveMedia(junk, home).problem, 'unsupported-format')
+  const chosen = resolveMedia(BUNDLED_MEDIA, home)
+  check('an explicit path resolves as chosen', chosen.source === 'chosen' && chosen.problem === undefined, JSON.stringify(chosen.problem))
+
+  console.log('\n[3] the Host half mounts and answers every route')
+  const mounted = mount({}, home)
+  equal('one index-inject handler is registered', mounted.injections.length, 1)
+  equal('five routes are registered', mounted.routes.length, 5)
+
+  const configRoute = route(mounted.routes, CONFIG_ROUTE)
+  const initial = await call(configRoute)
+  equal('config.json answers 200', initial.status, 200)
+  equal('config.json reports sound ON', initial.json.settings.sound, true)
+  equal('config.json reports the bundled clip kind', initial.json.media.kind, 'video')
+  equal('config.json reports the bundled source', initial.json.source, 'bundled')
+  check('config.json hands the browser a media URL', typeof initial.json.media.url === 'string' && initial.json.media.url.startsWith(MEDIA_ROUTE), JSON.stringify(initial.json.media))
+
+  const mediaRoute = route(mounted.routes, MEDIA_ROUTE, 'prefix')
+  const full = await call(mediaRoute, { path: `${MEDIA_ROUTE}/${encodeURIComponent(bundled.name)}` })
+  equal('the media route answers 200', full.status, 200)
+  equal('the media route sends video/mp4', full.headers['Content-Type'], 'video/mp4')
+  equal('the media route sends the whole file', full.body.length, bundled.bytes)
+  check('the media route advertises Range support', full.headers['Accept-Ranges'] === 'bytes')
+
+  const ranged = await call(mediaRoute, {
+    path: `${MEDIA_ROUTE}/${encodeURIComponent(bundled.name)}`,
+    headers: { range: 'bytes=0-99' },
+  })
+  equal('a Range request answers 206', ranged.status, 206)
+  equal('a Range request returns exactly the asked bytes', ranged.body.length, 100)
+  equal('a Range request carries Content-Range', ranged.headers['Content-Range'], `bytes 0-99/${bundled.bytes}`)
+
+  const unsatisfiable = await call(mediaRoute, {
+    path: `${MEDIA_ROUTE}/${encodeURIComponent(bundled.name)}`,
+    headers: { range: `bytes=${bundled.bytes + 10}-` },
+  })
+  equal('an unsatisfiable Range answers 416', unsatisfiable.status, 416)
+
+  const wrongName = await call(mediaRoute, { path: `${MEDIA_ROUTE}/somethingelse.mp4` })
+  equal('only the configured file is served', wrongName.status, 404)
+
+  console.log('\n[4] the settings page can actually change the sound switch')
+  const saveRoute = route(mounted.routes, SAVE_ROUTE)
+  const saved = await call(saveRoute, { method: 'POST', body: { sound: false, volume: 0.25 } })
+  equal('saving answers ok', saved.json.ok, true)
+  equal('the answer already reflects the new sound switch', saved.json.settings.sound, false)
+  check('the settings file was written', existsSync(join(home, 'dsh-boot-animation-sound', 'settings.json')))
+  const afterSave = await call(configRoute)
+  equal('the next read reports the stored sound switch', afterSave.json.settings.sound, false)
+  equal('the next read reports the stored volume', afterSave.json.settings.volume, 0.25)
+
+  await call(saveRoute, { method: 'POST', body: { src: '' } })
+  const afterClear = await call(configRoute)
+  equal('clearing the path stops the animation', afterClear.json.media.kind, 'none')
+  equal('a cleared path never falls back to the bundled clip', afterClear.json.source, 'cleared')
+  equal('a cleared path reports no effective src', afterClear.json.effectiveSrc, '')
+
+  await call(saveRoute, { method: 'POST', body: { src: 'D:/definitely/not/here.mp4' } })
+  const afterBad = await call(configRoute)
+  equal('a broken path is reported, not played', afterBad.json.problem, 'missing-file')
+  equal('a broken path still refuses to fall back', afterBad.json.media.kind, 'none')
+
+  await call(saveRoute, { method: 'POST', body: { src: BUNDLED_MEDIA, sound: true } })
+  const restored = await call(configRoute)
+  equal('restoring a good path brings the animation back', restored.json.media.kind, 'video')
+  equal('restoring also brings the sound switch back on', restored.json.settings.sound, true)
+
+  const rejected = await call(saveRoute, { method: 'POST', body: { sound: { evil: true }, volume: 'loud' } })
+  check('a malformed save is dropped rather than stored', rejected.json.settings.sound === true && rejected.json.settings.volume === 0.25, JSON.stringify(rejected.json.settings))
+  const notPost = await call(saveRoute, { method: 'GET' })
+  equal('the save route is POST-only', notPost.status, 405)
+
+  console.log('\n[5] the boot report is recorded')
+  const reportRoute = route(mounted.routes, REPORT_ROUTE)
+  const reported = await call(reportRoute, {
+    method: 'POST',
+    body: { audio: 'on', muted: false, fullscreen: false, audioDecodedBytes: 4096, why: 'settled' },
+  })
+  equal('the report route answers ok', reported.json.ok, true)
+  const reportFile = join(home, 'dsh-boot-animation-sound', 'last-boot.json')
+  check('the report file was written', existsSync(reportFile), reportFile)
+  const storedReport = JSON.parse(readFileSync(reportFile, 'utf8'))
+  equal('the report keeps the audio outcome', storedReport.audio, 'on')
+  equal('the report keeps the full-screen fact', storedReport.fullscreen, false)
+  check('the report is timestamped', typeof storedReport.at === 'string')
+  const withReport = await call(configRoute)
+  check('the settings page can read the last boot back', withReport.json.lastBoot !== null && withReport.json.lastBoot.audio === 'on')
+
+  console.log('\n[6] the first-paint cover, and its watchdog')
+  const table = []
+  mounted.injections[0](table)
+  equal('a playable clip injects two rows', table.length, 2)
+  const styleRow = table.find((row) => row.kind === 'style')
+  const scriptRow = table.find((row) => row.kind === 'script')
+  check('the style row hides #root', typeof styleRow?.text === 'string' && styleRow.text.includes('#root{visibility:hidden'))
+  check('the style row carries the cover marker', styleRow.text.includes('dsh-boot-animation-sound-cover'))
+  check('the style row carries the base marker', styleRow.text.includes('dsh-boot-animation-sound-base'))
+  check('the script row arms a watchdog', typeof scriptRow?.text === 'string' && scriptRow.text.includes('__DSH_BOOT_SOUND_COVER_GUARD__'))
+  check('the watchdog releases rather than re-arms', scriptRow.text.includes('setTimeout(go,10000)'))
+
+  const noCover = mount({ coverApplication: false }, home)
+  const emptyTable = []
+  noCover.injections[0](emptyTable)
+  equal('coverApplication:false injects nothing', emptyTable.length, 0)
+
+  const offHome = mkdtempSync(join(tmpdir(), 'dbas-off-'))
+  const off = mount({ src: '' }, offHome)
+  const offTable = []
+  off.injections[0](offTable)
+  equal('nothing to play injects nothing', offTable.length, 0)
+  rmSync(offHome, { recursive: true, force: true })
+
+  console.log('\n[7] the requirement itself: sound cannot reach full screen')
+  // Count CALL SITES, not prose: the header documents the guarantee by naming
+  // `requestFullscreen()`, so a naive substring count would measure the comment.
+  const codeLines = CLIENT.split('\n')
+  const callLines = codeLines
+    .map((line, index) => ({ line, index }))
+    .filter((entry) => /\.requestFullscreen\s*\(/.test(entry.line))
+  equal('client.js makes exactly one full-screen call in code', callLines.length, 1)
+  check('no webkitRequestFullscreen fallback exists', !CLIENT.includes('webkitRequestFullscreen'))
+  check('no fullscreenchange handling exists', !CLIENT.includes('fullscreenchange'))
+
+  const askLine = codeLines.findIndex((line) => line.includes('const askFullscreen'))
+  const askEndLine = codeLines.findIndex((line) => line.includes('const statusText'))
+  check('the full-screen button handler was found', askLine !== -1 && askEndLine > askLine)
+  check('the one call sits inside the full-screen BUTTON handler',
+    callLines.length === 1 && callLines[0].index > askLine && callLines[0].index < askEndLine,
+    callLines.length === 1 ? `line ${callLines[0].index}` : `${callLines.length} call sites`)
+  check('the full-screen button is off by default in the shipped defaults', DEFAULTS.showFullscreenButton === false)
+
+  const unlockStart = codeLines.findIndex((line) => line.includes('const unlock = React.useCallback'))
+  const unlockEnd = codeLines.findIndex((line) => line.includes('// The clip: point the element'))
+  check('the unlock path was found', unlockStart !== -1 && unlockEnd > unlockStart)
+  const unlockBody = codeLines.slice(unlockStart, unlockEnd).join('\n')
+  check('unlocking the sound never mentions full screen', !/fullscreen/i.test(unlockBody))
+  check('unlocking the sound makes no full-screen call', !/\.requestFullscreen\s*\(/.test(unlockBody))
+  check('unlocking the sound only clears `muted` and replays', unlockBody.includes('video.muted = false') && unlockBody.includes('video.play()'))
+
+  const firstInputStart = codeLines.findIndex((line) => line.includes('// Sound at the first click or key press ANYWHERE'))
+  const firstInputEnd = codeLines.findIndex((line) => line.includes('// `skip: auto`'))
+  const firstInputBody = codeLines.slice(firstInputStart, firstInputEnd).join('\n')
+  check('the first-input unlock was found', firstInputStart !== -1 && firstInputEnd > firstInputStart)
+  check('the first-input unlock is a capture listener on window', firstInputBody.includes("window.addEventListener('pointerdown', handler, true)"))
+  check('the first-input unlock never enters full screen', !firstInputBody.toLowerCase().includes('fullscreen'))
+  check('the first-input unlock never stops or prevents the event', !firstInputBody.includes('stopPropagation') && !firstInputBody.includes('preventDefault'))
+
+  check('the clip is asked to play audibly first (muted is not forced on)', CLIENT.includes('video.muted = !wantSound'))
+  check('a muted retry exists so the animation always plays', CLIENT.includes('video.muted = true'))
+
+  console.log('\n[7b] the animation is bound to a page LOAD, not to when the module appears')
+  check('the page-load gate exists', CLIENT.includes('function belongsToThisPageLoad'))
+  check('the gate reads the Host cover as its precise signal', CLIENT.includes('COVER_MARKERS.some((marker) => text.includes(marker))) return true'))
+  check('the gate has a freshness fallback for coverApplication:false', CLIENT.includes('performance.now() < 20000'))
+  check('the gate is evaluated once per mount, not per render', CLIENT.includes('if (fresh.current === null) fresh.current = belongsToThisPageLoad()'))
+  check('the animation is gated on it', CLIENT.includes('fresh.current === true && config !== null'))
+
+  console.log('\n[7c] the animation can never keep the interface covered')
+  // A slot registry keeps the component MOUNTED for the life of the page, so
+  // "finished" has to remove what is painted. A transparent full-screen box still
+  // swallows every click, and that defect made the whole application unresponsive
+  // while a body-level widget kept animating.
+  check('a run gate distinguishes "should run" from "is running"', CLIENT.includes("const running = active && phase !== 'done'"))
+  check('nothing is painted once the animation is done', CLIENT.includes('if (!running) return null'))
+  check('no effect is still gated on `active` alone', !CLIENT.includes('if (!active) return undefined'))
+  check('no effect still lists `active` alone as a dependency', !/\[active,/.test(CLIENT))
+  check('pointer events are released with the fade, not only with the unmount', CLIENT.includes("pointerEvents: fading ? 'none' : 'auto'"))
+  check('closing stops and detaches the clip at once', CLIENT.includes("video.removeAttribute('src')"))
+  check('a hard lifetime ceiling is armed regardless of media events', CLIENT.includes('after(600000,'))
+  check('a length that is missing or infinite is still bounded', CLIENT.includes('bound it explicitly'))
+
+  console.log('\n[8] the package declares what DSH looks for')
+  equal('dsh.bundle.patch is declared', MANIFEST.dsh?.bundle?.patch, './cordis.patch.yml')
+  equal('the client platform is web', MANIFEST.dsh?.client?.platform, 'web')
+  equal('the client half loads immediately', MANIFEST.dsh?.client?.immediately, true)
+  equal('the client entry is exported', MANIFEST.exports?.['./client'], './client.js')
+  check('a DSH engine range is declared', typeof MANIFEST.dsh?.engines?.dsh === 'string')
+  equal('the host entry is the package main', MANIFEST.main, './index.js')
+  check('the bundled clip is shipped in the package files', Array.isArray(MANIFEST.files) && MANIFEST.files.includes('media'))
+  check('the client loader registration id matches the package', CLIENT.includes("id: 'dsh-boot-animation-sound'"))
+} finally {
+  rmSync(home, { recursive: true, force: true })
+}
+
+console.log(`\n${checks - failures}/${checks} checks passed`)
+if (failures > 0) {
+  console.error(`${failures} check(s) FAILED`)
+  process.exit(1)
+}
+console.log('all good')

@@ -1,0 +1,6 @@
+# Normalize text to LF in the repository so the Windows dev machine and the
+# Linux CI runners agree, and keep the sample clip strictly binary.
+* text=auto eol=lf
+*.mp4 -text
+*.png -text
+*.ico -text

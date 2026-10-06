@@ -1,0 +1,17 @@
+# 依赖与构建产物
+node_modules/
+
+# 编辑器与系统
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+
+# 日志与临时文件
+*.log
+*.tmp
+.DS_Store
+
+# 本机验证时产生的临时文件
+verify/*.tmp
