@@ -18,14 +18,18 @@ import { fileURLToPath } from 'node:url'
 
 import {
   BUNDLED_MEDIA,
+  CLAIM_ROUTE,
   CONFIG_ROUTE,
   DEFAULTS,
   MEDIA_ROUTE,
   REPORT_ROUTE,
+  RESET_ROUTE,
   SAVE_ROUTE,
   apply,
+  decidePlay,
   normalizeConfig,
   resolveMedia,
+  triggerMatches,
 } from '../index.js'
 
 const PACKAGE_DIR = fileURLToPath(new URL('..', import.meta.url))
@@ -168,6 +172,46 @@ try {
   equal('junk background falls back', normalizeConfig({ background: 'red' }).background, DEFAULTS.background)
   equal('src is preserved as a string', normalizeConfig({ src: 'D:/v/a.mp4' }).src, 'D:/v/a.mp4')
   equal('cleared src stays the empty string', normalizeConfig({ src: '' }).src, '')
+  equal('trigger default keeps the pre-trigger behaviour', defaults.trigger, 'pageRefresh')
+  equal('frequency default is unlimited', defaults.frequency, 'every')
+  equal('a junk trigger falls back', normalizeConfig({ trigger: 'whenever' }).trigger, 'pageRefresh')
+  equal('a junk frequency falls back', normalizeConfig({ frequency: 'sometimes' }).frequency, 'every')
+  equal('maxPlays is clamped up to at least 1', normalizeConfig({ maxPlays: 0 }).maxPlays, 1)
+  equal('maxPlays is clamped down', normalizeConfig({ maxPlays: 99999 }).maxPlays, 1000)
+  equal('maxPlays is rounded', normalizeConfig({ maxPlays: 2.6 }).maxPlays, 3)
+
+  console.log('\n[1b] triggers and the frequency ledger')
+  equal('appStart accepts the first page load', triggerMatches('appStart', 'appStart'), true)
+  equal('appStart ignores a later page load', triggerMatches('appStart', 'pageRefresh'), false)
+  equal('pageRefresh accepts the first page load too', triggerMatches('pageRefresh', 'appStart'), true)
+  equal('pageRefresh accepts every later page load', triggerMatches('pageRefresh', 'pageRefresh'), true)
+  equal('pageRefresh ignores a conversation', triggerMatches('pageRefresh', 'newConversation'), false)
+  equal('newConversation accepts a new conversation', triggerMatches('newConversation', 'newConversation'), true)
+  equal('newConversation ignores opening an old one', triggerMatches('newConversation', 'sessionOpen'), false)
+  equal('anySession accepts opening a conversation', triggerMatches('anySession', 'sessionOpen'), true)
+  equal('anySession accepts a new conversation', triggerMatches('anySession', 'newConversation'), true)
+  equal('anySession ignores a page load', triggerMatches('anySession', 'pageRefresh'), false)
+
+  const playableMedia = resolveMedia(undefined, home)
+  const base = normalizeConfig({})
+  const empty = { plays: 0, lastPlayedOn: null }
+  equal('a fresh ledger plays', decidePlay(base, playableMedia, 'pageRefresh', empty).play, true)
+  equal('a switched-off animation never plays', decidePlay(normalizeConfig({ enabled: false }), playableMedia, 'pageRefresh', empty).reason, 'disabled')
+  equal('a trigger mismatch refuses', decidePlay(base, playableMedia, 'newConversation', empty).reason, 'trigger')
+  equal('no media refuses', decidePlay(base, resolveMedia('D:/nope.mp4', home), 'pageRefresh', empty).reason, 'no-media')
+  equal('decision alone does NOT spend a play', decidePlay(base, playableMedia, 'pageRefresh', empty).play, true)
+
+  const now = new Date(2026, 9, 6, 12, 0, 0)
+  const daily = normalizeConfig({ frequency: 'daily' })
+  equal('daily plays when the ledger is from yesterday', decidePlay(daily, playableMedia, 'pageRefresh', { plays: 3, lastPlayedOn: '2026-10-05' }, now).play, true)
+  equal('daily refuses later the same day', decidePlay(daily, playableMedia, 'pageRefresh', { plays: 3, lastPlayedOn: '2026-10-06' }, now).reason, 'daily')
+  const once = normalizeConfig({ frequency: 'once' })
+  equal('once plays on an empty ledger', decidePlay(once, playableMedia, 'pageRefresh', empty, now).play, true)
+  equal('once refuses after one play', decidePlay(once, playableMedia, 'pageRefresh', { plays: 1, lastPlayedOn: null }, now).reason, 'once')
+  const times = normalizeConfig({ frequency: 'times', maxPlays: 2 })
+  equal('times plays under budget', decidePlay(times, playableMedia, 'pageRefresh', { plays: 1, lastPlayedOn: null }, now).play, true)
+  equal('times refuses at budget', decidePlay(times, playableMedia, 'pageRefresh', { plays: 2, lastPlayedOn: null }, now).reason, 'times')
+  equal('times refuses over budget', decidePlay(times, playableMedia, 'pageRefresh', { plays: 9, lastPlayedOn: null }, now).reason, 'times')
 
   console.log('\n[2] media resolution')
   const bundled = resolveMedia(undefined, home)
@@ -187,7 +231,7 @@ try {
   console.log('\n[3] the Host half mounts and answers every route')
   const mounted = mount({}, home)
   equal('one index-inject handler is registered', mounted.injections.length, 1)
-  equal('five routes are registered', mounted.routes.length, 5)
+  equal('seven routes are registered', mounted.routes.length, 7)
 
   const configRoute = route(mounted.routes, CONFIG_ROUTE)
   const initial = await call(configRoute)
@@ -268,6 +312,71 @@ try {
   const withReport = await call(configRoute)
   check('the settings page can read the last boot back', withReport.json.lastBoot !== null && withReport.json.lastBoot.audio === 'on')
 
+  console.log('\n[5b] a claim spends the ledger, and only a claim does')
+  const claimRoute = route(mounted.routes, CLAIM_ROUTE)
+  const freshHome = mkdtempSync(join(tmpdir(), 'dbas-claim-'))
+  const claimer = mount({ trigger: 'pageRefresh', frequency: 'times', maxPlays: 2 }, freshHome)
+  const claim = route(claimer.routes, CLAIM_ROUTE)
+  const claimConfig = route(claimer.routes, CONFIG_ROUTE)
+
+  equal('an empty ledger starts at zero', (await call(claimConfig)).json.playState.plays, 0)
+  const first = await call(claim, { method: 'POST', body: { occasion: 'appStart' } })
+  equal('the first claim plays', first.json.play, true)
+  equal('and it spent one play', first.json.playState.plays, 1)
+  equal('the ledger on disk agrees', JSON.parse(readFileSync(join(freshHome, 'dsh-boot-animation-sound', 'play-state.json'), 'utf8')).plays, 1)
+  const second = await call(claim, { method: 'POST', body: { occasion: 'pageRefresh' } })
+  equal('the second claim plays', second.json.play, true)
+  equal('and it spent the second', second.json.playState.plays, 2)
+  const third = await call(claim, { method: 'POST', body: { occasion: 'pageRefresh' } })
+  equal('the third claim is refused', third.json.play, false)
+  equal('and it names the setting that refused', third.json.reason, 'times')
+  equal('a refused claim spends NOTHING', (await call(claimConfig)).json.playState.plays, 2)
+
+  const wrongOccasion = await call(claim, { method: 'POST', body: { occasion: 'whenever' } })
+  equal('an unknown occasion is rejected', wrongOccasion.status, 400)
+  const notPostClaim = await call(claim, { method: 'GET' })
+  equal('the claim route is POST-only', notPostClaim.status, 405)
+
+  const resetRoute = route(claimer.routes, RESET_ROUTE)
+  const afterReset = await call(resetRoute, { method: 'POST' })
+  equal('resetting answers with the new state', afterReset.json.playState.plays, 0)
+  equal('and the budget is available again', (await call(claim, { method: 'POST', body: { occasion: 'pageRefresh' } })).json.play, true)
+
+  // The daily rule is about the user's calendar day, not a 24 hour window.
+  const dailyHome = mkdtempSync(join(tmpdir(), 'dbas-daily-'))
+  const dailyMounted = mount({ frequency: 'daily' }, dailyHome)
+  const dailyClaim = route(dailyMounted.routes, CLAIM_ROUTE)
+  check('the first claim of a day plays', (await call(dailyClaim, { method: 'POST', body: { occasion: 'pageRefresh' } })).json.play === true)
+  const sameDay = await call(dailyClaim, { method: 'POST', body: { occasion: 'pageRefresh' } })
+  equal('a second claim the same day is refused', sameDay.json.play, false)
+  equal('and it says why', sameDay.json.reason, 'daily')
+  // Backdate the ledger to yesterday and the budget opens again.
+  const dailyState = join(dailyHome, 'dsh-boot-animation-sound', 'play-state.json')
+  const backdated = JSON.parse(readFileSync(dailyState, 'utf8'))
+  backdated.lastPlayedOn = '2000-01-01'
+  writeFileSync(dailyState, JSON.stringify(backdated))
+  check('a claim on a later day plays again', (await call(dailyClaim, { method: 'POST', body: { occasion: 'pageRefresh' } })).json.play === true)
+
+  const onceHome = mkdtempSync(join(tmpdir(), 'dbas-once-'))
+  const onceMounted = mount({ frequency: 'once' }, onceHome)
+  const onceClaim = route(onceMounted.routes, CLAIM_ROUTE)
+  check('once plays the first time', (await call(onceClaim, { method: 'POST', body: { occasion: 'pageRefresh' } })).json.play === true)
+  const onceAgain = await call(onceClaim, { method: 'POST', body: { occasion: 'pageRefresh' } })
+  equal('once never plays again', onceAgain.json.play, false)
+  equal('and it says why', onceAgain.json.reason, 'once')
+
+  // A conversation trigger must not fire on a page load at all.
+  const conversationHome = mkdtempSync(join(tmpdir(), 'dbas-conv-'))
+  const conversationMounted = mount({ trigger: 'newConversation' }, conversationHome)
+  const conversationClaim = route(conversationMounted.routes, CLAIM_ROUTE)
+  equal('a page load is refused when the trigger is a conversation',
+    (await call(conversationClaim, { method: 'POST', body: { occasion: 'pageRefresh' } })).json.reason, 'trigger')
+  equal('the conversation occasion is accepted',
+    (await call(conversationClaim, { method: 'POST', body: { occasion: 'newConversation' } })).json.play, true)
+
+  for (const leftover of [freshHome, dailyHome, onceHome, conversationHome]) rmSync(leftover, { recursive: true, force: true })
+  void claimRoute
+
   console.log('\n[6] the first-paint cover, and its watchdog')
   const table = []
   mounted.injections[0](table)
@@ -291,6 +400,31 @@ try {
   off.injections[0](offTable)
   equal('nothing to play injects nothing', offTable.length, 0)
   rmSync(offHome, { recursive: true, force: true })
+
+  // A page load whose animation has spent its budget must NOT be covered: the user
+  // would get a black screen and then watch it released for no reason.
+  const spentHome = mkdtempSync(join(tmpdir(), 'dbas-spent-'))
+  const spent = mount({ frequency: 'once' }, spentHome)
+  const firstTable = []
+  spent.injections[0](firstTable)
+  equal('the first page load of a once-only animation is covered', firstTable.length, 2)
+  // Spend the budget the way the browser half would.
+  await call(route(spent.routes, CLAIM_ROUTE), { method: 'POST', body: { occasion: 'appStart' } })
+  const secondTable = []
+  spent.injections[0](secondTable)
+  equal('a later page load with a spent budget is NOT covered', secondTable.length, 0)
+  rmSync(spentHome, { recursive: true, force: true })
+
+  // The occasion the browser half reports is the Host's own verdict, so a trigger
+  // and the cover decision cannot disagree.
+  const occasionHome = mkdtempSync(join(tmpdir(), 'dbas-occ-'))
+  const occasionMounted = mount({}, occasionHome)
+  const occasionTable = []
+  occasionMounted.injections[0](occasionTable)
+  equal('the first index render is the application start', (await call(route(occasionMounted.routes, CONFIG_ROUTE))).json.pageOccasion, 'appStart')
+  occasionMounted.injections[0]([])
+  equal('a later index render is a page refresh', (await call(route(occasionMounted.routes, CONFIG_ROUTE))).json.pageOccasion, 'pageRefresh')
+  rmSync(occasionHome, { recursive: true, force: true })
 
   console.log('\n[7] the requirement itself: sound cannot reach full screen')
   // Count CALL SITES, not prose: the header documents the guarantee by naming
@@ -335,14 +469,27 @@ try {
   check('the gate reads the Host cover as its precise signal', CLIENT.includes('COVER_MARKERS.some((marker) => text.includes(marker))) return true'))
   check('the gate has a freshness fallback for coverApplication:false', CLIENT.includes('performance.now() < 20000'))
   check('the gate is evaluated once per mount, not per render', CLIENT.includes('if (fresh.current === null) fresh.current = belongsToThisPageLoad()'))
-  check('the animation is gated on it', CLIENT.includes('fresh.current === true && config !== null'))
+  check('a page-load trigger claims only when the module load IS the page load', CLIENT.includes('if (!ready || !pageTriggers || fresh.current !== true)'))
+  check('the occasion claimed is the Host verdict, not a guess', CLIENT.includes('claim(config.pageOccasion)'))
+
+  console.log('\n[7d] the conversation triggers wrap the navigation service, safely')
+  check('a watcher exists', CLIENT.includes('function watchConversations'))
+  check('it wraps the new-conversation action', CLIENT.includes("wrap('startSession', 'newConversation')"))
+  check('it wraps opening an existing conversation', CLIENT.includes("wrap('openSession', 'sessionOpen')"))
+  check('the original is called first and its result returned', CLIENT.includes('const result = original.apply(this, args)'))
+  check('the notification is isolated from navigation', CLIENT.includes('a failed trigger must never break navigation'))
+  check('the wrapper verifies its assignment took effect', CLIENT.includes('if (workspace[method] !== wrapped) return'))
+  check('every wrapper can be restored', CLIENT.includes('for (const restore of restores) restore()'))
+  check('the watcher is only installed for conversation triggers', CLIENT.includes('if (!CONVERSATION_TRIGGERS.has(trigger)) return'))
+  check('it is installed with the plugin lifetime', CLIENT.includes('ctx.effect(() => watchConversations(ctx, report))'))
 
   console.log('\n[7c] the animation can never keep the interface covered')
   // A slot registry keeps the component MOUNTED for the life of the page, so
   // "finished" has to remove what is painted. A transparent full-screen box still
   // swallows every click, and that defect made the whole application unresponsive
   // while a body-level widget kept animating.
-  check('a run gate distinguishes "should run" from "is running"', CLIENT.includes("const running = active && phase !== 'done'"))
+  check('a run gate distinguishes "should run" from "is running"', CLIENT.includes('const running = active && doneNonce !== nonce'))
+  check('a finished run is recorded so the NEXT occasion can play again', CLIENT.includes('setDoneNonce(nonceRef.current)'))
   check('nothing is painted once the animation is done', CLIENT.includes('if (!running) return null'))
   check('no effect is still gated on `active` alone', !CLIENT.includes('if (!active) return undefined'))
   check('no effect still lists `active` alone as a dependency', !/\[active,/.test(CLIENT))

@@ -52,9 +52,16 @@ window.__ModuleLoader__.load({
     const SAVE_URL = `${BASE}/config`
     const PICK_URL = `${BASE}/pick`
     const REPORT_URL = `${BASE}/report`
+    const CLAIM_URL = `${BASE}/claim`
+    const RESET_URL = `${BASE}/reset`
     const OVERLAY_SLOT = 'shell.overlay'
     const TAB_SLOT = 'settings.plugins.tab'
     const ROW_ID = 'dsh-boot-animation-sound'
+
+    /** Triggers that fire on a page load, where the Host decides the occasion. */
+    const PAGE_TRIGGERS = new Set(['appStart', 'pageRefresh'])
+    /** Triggers that fire on a conversation action, watched in the browser. */
+    const CONVERSATION_TRIGGERS = new Set(['newConversation', 'anySession'])
 
     /**
      * The stacking level of the animation.
@@ -138,6 +145,71 @@ window.__ModuleLoader__.load({
       return performance.now() < 20000
     }
 
+    /**
+     * Watch the conversation actions, for the `newConversation` and `anySession`
+     * triggers.
+     *
+     * The client event catalogue has no session event at all — it is
+     * `connection/reset`, `locale/change`, `slots/changed` and `theme/change` — so
+     * the only honest way to notice "the user opened a conversation" is to wrap the
+     * service the interface calls to do it.
+     *
+     * The wrapper is deliberately conservative, because a hook that breaks
+     * navigation is worse than a trigger that never fires:
+     *
+     *   - the original is called FIRST, with the same receiver, and its result is
+     *     returned unchanged, so the action behaves identically even if the
+     *     notification throws;
+     *   - assignment is verified (a frozen or accessor-only service simply ends up
+     *     unwrapped);
+     *   - the returned disposer restores every method it changed, and only if the
+     *     property still holds this wrapper.
+     *
+     * @param ctx - the plugin context, asked for the workspace service.
+     * @param report - called with the occasion that just happened.
+     * @returns a disposer for every wrapper installed.
+     */
+    function watchConversations(ctx, report) {
+      let workspace
+      try {
+        workspace = ctx.get('uiWorkspace')
+      } catch {
+        workspace = undefined
+      }
+      if (workspace === null || typeof workspace !== 'object') return () => {}
+      const restores = []
+      const wrap = (method, occasion) => {
+        const original = workspace[method]
+        if (typeof original !== 'function') return
+        const wrapped = function (...args) {
+          const result = original.apply(this, args)
+          try {
+            report(occasion)
+          } catch { /* a failed trigger must never break navigation */ }
+          return result
+        }
+        try {
+          workspace[method] = wrapped
+        } catch {
+          return
+        }
+        if (workspace[method] !== wrapped) return
+        restores.push(() => {
+          try {
+            if (workspace[method] === wrapped) workspace[method] = original
+          } catch { /* the service was replaced underneath us */ }
+        })
+      }
+      // Starting or connecting a conversation is a NEW conversation; opening one is
+      // just a session becoming visible.
+      wrap('startSession', 'newConversation')
+      wrap('connectWorkspace', 'newConversation')
+      wrap('openSession', 'sessionOpen')
+      return () => {
+        for (const restore of restores) restore()
+      }
+    }
+
     /** @returns the interface language, so the boot screen follows the OS. */
     function locale() {
       try {
@@ -178,6 +250,36 @@ window.__ModuleLoader__.load({
         tabHint: '清空路径后，DSH 启动与没装这个插件时完全一样。',
         lastBoot: '最近一次启动的声音记录',
         noRecord: '还没有记录。启动一次 DSH 后这里会显示实际结果。',
+        triggerLabel: '触发时机',
+        triggers: {
+          appStart: '启动应用',
+          pageRefresh: '页面刷新',
+          newConversation: '新对话',
+          anySession: '任意会话',
+        },
+        triggerHint: '启动应用＝一次运行里只算第一次页面加载；页面刷新＝每次页面加载都算；新对话＝新建对话时；任意会话＝打开任意对话时（含新建）。',
+        frequencyLabel: '播放频率',
+        frequencies: {
+          every: '每次',
+          daily: '每天一次',
+          once: '只播一次',
+          times: '限播 N 次',
+        },
+        frequencyHint: '计数存在 DSH 的状态目录里，按本机累计：刷新页面、开第二个窗口、重启 DSH 都算在同一份账上。',
+        maxPlaysLabel: '限播次数',
+        ledgerLabel: '播放账本',
+        ledgerNever: '还没播放过',
+        resetLedger: '重置计数',
+        resetDone: '计数已重置',
+        denied: {
+          disabled: '动画已关闭',
+          'no-media': '没有可播放的视频',
+          trigger: '触发时机不匹配',
+          daily: '今天已经播过了',
+          once: '「只播一次」已经用掉了',
+          times: '「限播 N 次」已经用完了',
+          ledger: '计数写入失败，这次不播',
+        },
         probs: {
           'missing-file': '文件不存在',
           'unreadable-file': '文件无法读取',
@@ -233,6 +335,36 @@ window.__ModuleLoader__.load({
         tabHint: 'With the path cleared, DSH starts exactly as it would without this plugin.',
         lastBoot: 'Last boot, as recorded',
         noRecord: 'No record yet. It appears after one DSH start.',
+        triggerLabel: 'Trigger',
+        triggers: {
+          appStart: 'Application start',
+          pageRefresh: 'Page load',
+          newConversation: 'New conversation',
+          anySession: 'Any conversation',
+        },
+        triggerHint: 'Application start counts only the first page load of one run; page load counts every one; the conversation triggers fire when a conversation is started or opened.',
+        frequencyLabel: 'Frequency',
+        frequencies: {
+          every: 'Every time',
+          daily: 'Once a day',
+          once: 'Only once',
+          times: 'At most N times',
+        },
+        frequencyHint: 'Counted per machine, in the DSH state directory: a refresh, a second window and a restart all draw on the same ledger.',
+        maxPlaysLabel: 'Times allowed',
+        ledgerLabel: 'Play ledger',
+        ledgerNever: 'Never played yet',
+        resetLedger: 'Reset the count',
+        resetDone: 'Count reset',
+        denied: {
+          disabled: 'The animation is switched off',
+          'no-media': 'No playable video',
+          trigger: 'This occasion does not match the trigger',
+          daily: 'Already played today',
+          once: 'The "only once" budget is spent',
+          times: 'The "at most N times" budget is spent',
+          ledger: 'The ledger could not be written, so nothing played',
+        },
         probs: {
           'missing-file': 'The file does not exist',
           'unreadable-file': 'The file cannot be read',
@@ -302,6 +434,49 @@ window.__ModuleLoader__.load({
       return Math.min(Math.max(value, min), max)
     }
 
+    /**
+     * Ask the Host whether the animation may play now.
+     *
+     * The Host answers with the trigger match AND the frequency budget already
+     * applied, and SPENDS one play when the answer is yes. Keeping that decision
+     * on one side is what makes the ledger trustworthy: a browser-side counter
+     * would be per-window, and would forget on a refresh.
+     *
+     * @param occasion - `appStart`, `pageRefresh`, `newConversation` or `sessionOpen`.
+     * @returns the Host's verdict, or `null` when it could not be reached.
+     */
+    async function claim(occasion) {
+      const answer = await post(CLAIM_URL, { occasion })
+      return answer !== null && typeof answer === 'object' ? answer : null
+    }
+
+    /**
+     * The "play now" signal, shared by the animation component and the
+     * conversation watchers.
+     *
+     * A monotonic nonce rather than a flag: a conversation trigger can fire again
+     * after the animation has already finished, and each occasion needs its own
+     * replay. Watchers only ever bump it; the component subscribes.
+     */
+    const playStore = {
+      nonce: 0,
+      listeners: new Set(),
+      /** Ask for a play, and tell every subscriber. */
+      request() {
+        playStore.nonce += 1
+        for (const listener of [...playStore.listeners]) {
+          try {
+            listener(playStore.nonce)
+          } catch { /* one bad listener must not stop the others */ }
+        }
+      },
+      /** @returns a disposer. */
+      subscribe(listener) {
+        playStore.listeners.add(listener)
+        return () => playStore.listeners.delete(listener)
+      },
+    }
+
     /** @returns the CSS `object-fit` for a configured fit mode. */
     function objectFit(fit) {
       return fit === 'contain' ? 'contain' : fit === 'fill' ? 'fill' : 'cover'
@@ -336,12 +511,22 @@ window.__ModuleLoader__.load({
       const [fading, setFading] = React.useState(false)
       const [progress, setProgress] = React.useState(0)
       const [remaining, setRemaining] = React.useState(null)
+      /** Which play request produced the current run; `0` means none yet. */
+      const [nonce, setNonce] = React.useState(0)
+      /** The request that has already finished, so a NEW one can start again. */
+      const [doneNonce, setDoneNonce] = React.useState(-1)
+      const nonceRef = React.useRef(0)
+      nonceRef.current = nonce
 
       /** Keep the ref and the state in step, so listeners read a fresh value. */
       const setAudioState = React.useCallback((next) => {
         audioRef.current = next
         setAudio(next)
       }, [])
+
+      // One play request, from either source: this component's own page-load
+      // claim, or a conversation watcher bumping the shared store.
+      React.useEffect(() => playStore.subscribe(setNonce), [])
 
       React.useEffect(() => {
         let cancelled = false
@@ -360,14 +545,48 @@ window.__ModuleLoader__.load({
       // off the moment it painted its first frame.
       const fresh = React.useRef(null)
       if (fresh.current === null) fresh.current = belongsToThisPageLoad()
-      const active = fresh.current === true && config !== null && settings.enabled === true && media.kind === 'video' && !(config.problem)
+
+      /** There is a clip, it is playable, and the settings allow showing it. */
+      const ready = config !== null && settings.enabled === true && media.kind === 'video' && !(config.problem)
+
+      /**
+       * Ask the Host for this page load's play, and take the cover off when the
+       * answer is no.
+       *
+       * The occasion is the Host's own verdict (`appStart` for the first index
+       * render of the run, `pageRefresh` for every later one) rather than anything
+       * guessed here, so a trigger cannot disagree with the cover decision that was
+       * already made from the same counters.
+       */
+      React.useEffect(() => {
+        if (config === null) return undefined
+        let cancelled = false
+        const pageTriggers = PAGE_TRIGGERS.has(settings.trigger)
+        // Nothing plays on this page load for a conversation trigger, and a module
+        // that arrived after the page load has no page load of its own to join.
+        if (!ready || !pageTriggers || fresh.current !== true) {
+          releaseCover()
+          return undefined
+        }
+        claim(config.pageOccasion).then((answer) => {
+          if (cancelled) return
+          if (answer !== null && answer.play === true) playStore.request()
+          else releaseCover()
+        })
+        return () => {
+          cancelled = true
+        }
+      }, [config, ready, settings.trigger])
+
+      /** A play was claimed for the current request. */
+      const active = ready && nonce > 0
 
       /**
        * Whether the animation is on screen RIGHT NOW.
        *
-       * `active` says "this page load should have a boot animation"; `running`
-       * adds "and it has not finished". The distinction is the whole reason this
-       * variable exists, and getting it wrong is not cosmetic:
+       * `active` says "a play was claimed"; `running` adds "and it has not
+       * finished". The distinction is the whole reason this variable exists, and
+       * getting it wrong is not cosmetic:
        *
        * A slot registry keeps the component MOUNTED for the life of the page, so
        * "the animation is over" has to be a RENDER decision — not an unmount, and
@@ -380,13 +599,7 @@ window.__ModuleLoader__.load({
        * null does NOT unmount the component, so effects keep running and their
        * cleanups never fire unless a dependency changes.
        */
-      const running = active && phase !== 'done'
-
-      // Nothing will be drawn on this page load, so take the Host's cover off at
-      // once rather than leaving the application hidden until the watchdog fires.
-      React.useEffect(() => {
-        if (config !== null && !active) releaseCover()
-      }, [config, active])
+      const running = active && doneNonce !== nonce
 
       /** Post what actually happened, once per concern rather than per frame. */
       const report = React.useCallback((why) => {
@@ -425,14 +638,17 @@ window.__ModuleLoader__.load({
           try {
             video.pause()
             // Detaching is what actually stops the audio. The effect below is
-            // also cleaned up when `phase` flips, but a skip must silence the clip
-            // at once rather than at the next commit.
+            // also cleaned up when `running` flips, but a skip must silence the
+            // clip at once rather than at the next commit.
             video.removeAttribute('src')
             video.load()
           } catch { /* already stopped */ }
         }
         releaseCover()
         setPhase('done')
+        // Which request finished. A LATER request has a different nonce, so the
+        // animation can run again for the next occasion instead of being spent.
+        setDoneNonce(nonceRef.current)
       }, [report])
 
       /** Fade out and then leave, holding the last frame for the configured pause. */
@@ -487,6 +703,7 @@ window.__ModuleLoader__.load({
         const video = videoRef.current
         if (video === null) return undefined
         closedRef.current = false
+        setPhase('loading')
         setFading(false)
         setProgress(0)
 
@@ -656,7 +873,7 @@ window.__ModuleLoader__.load({
             video.load()
           } catch { /* a detached media element can throw; nothing is left to release */ }
         }
-      }, [running, config, media.url, settings.sound, settings.volume, settings.playbackRate, settings.duration, settings.maxReplays, close, finish, report, setAudioState])
+      }, [running, nonce, config, media.url, settings.sound, settings.volume, settings.playbackRate, settings.duration, settings.maxReplays, close, finish, report, setAudioState])
 
       // Sound at the first click or key press ANYWHERE. Capture phase, and
       // deliberately silent: it stops nothing, prevents nothing and never changes
@@ -927,6 +1144,7 @@ window.__ModuleLoader__.load({
           problem: (result && result.problem) || null,
           source: (result && result.source) || null,
           lastBoot: (result && result.lastBoot) || null,
+          playState: (result && result.playState) || { plays: 0, lastPlayedOn: null },
           notice: null,
         })
       }, [])
@@ -967,6 +1185,18 @@ window.__ModuleLoader__.load({
       const settings = state.settings || {}
       const media = state.media || { kind: 'none' }
       const playing = state.status === 'ready' && media.kind === 'video' && settings.enabled === true
+      const playState = state.playState || { plays: 0, lastPlayedOn: null }
+      const resetCount = async () => {
+        setBusy(true)
+        const result = await post(RESET_URL)
+        setBusy(false)
+        if (result.ok !== true) {
+          setState((previous) => ({ ...previous, status: 'ready', problem: result.error ?? 'write-failed' }))
+          return
+        }
+        apply(result)
+        setState((previous) => ({ ...previous, notice: t.resetDone }))
+      }
       const problemText = state.problem === null || state.problem === undefined
         ? null
         : t.probs[state.problem] ?? String(state.problem)
@@ -1082,6 +1312,57 @@ window.__ModuleLoader__.load({
           ]),
         ]),
 
+        h('div', { key: 'trigger', style: ROW }, [
+          h('span', { key: 'l', style: { fontSize: '13px' } }, t.triggerLabel),
+          h('select', {
+            key: 's',
+            value: settings.trigger ?? 'pageRefresh',
+            disabled: busy,
+            onChange: (event) => save({ trigger: event.target.value }),
+            style: { ...FIELD, appearance: 'auto' },
+          }, [
+            h('option', { key: 'a', value: 'appStart' }, t.triggers.appStart),
+            h('option', { key: 'p', value: 'pageRefresh' }, t.triggers.pageRefresh),
+            h('option', { key: 'n', value: 'newConversation' }, t.triggers.newConversation),
+            h('option', { key: 'y', value: 'anySession' }, t.triggers.anySession),
+          ]),
+          h('div', { key: 'hint', style: MUTED }, t.triggerHint),
+        ]),
+        h('div', { key: 'frequency', style: ROW }, [
+          h('span', { key: 'l', style: { fontSize: '13px' } }, t.frequencyLabel),
+          h('select', {
+            key: 's',
+            value: settings.frequency ?? 'every',
+            disabled: busy,
+            onChange: (event) => save({ frequency: event.target.value }),
+            style: { ...FIELD, appearance: 'auto' },
+          }, [
+            h('option', { key: 'e', value: 'every' }, t.frequencies.every),
+            h('option', { key: 'd', value: 'daily' }, t.frequencies.daily),
+            h('option', { key: 'o', value: 'once' }, t.frequencies.once),
+            h('option', { key: 't', value: 'times' }, t.frequencies.times),
+          ]),
+          settings.frequency === 'times'
+            ? h('div', { key: 'n', style: { display: 'flex', gap: '8px', alignItems: 'center', marginTop: '4px' } }, [
+                h('span', { key: 'l', style: { fontSize: '13px', whiteSpace: 'nowrap' } }, t.maxPlaysLabel),
+                h('input', {
+                  key: 'i',
+                  type: 'number',
+                  min: 1,
+                  max: 1000,
+                  step: 1,
+                  // Saved on blur rather than on every keystroke: typing "12" would
+                  // otherwise persist a budget of 1 on the way.
+                  defaultValue: String(num(settings.maxPlays, 3, 1, 1000)),
+                  disabled: busy,
+                  onBlur: (event) => save({ maxPlays: Number(event.target.value) }),
+                  style: { ...FIELD, width: '110px' },
+                }),
+              ])
+            : null,
+          h('div', { key: 'hint', style: MUTED }, t.frequencyHint),
+        ]),
+
         h('div', { key: 'path', style: ROW }, [
           h('span', { key: 'l', style: { fontSize: '13px' } }, t.pathLabel),
           h('div', { key: 'row', style: { display: 'flex', gap: '8px' } }, [
@@ -1128,6 +1409,14 @@ window.__ModuleLoader__.load({
             `${t.current}: ${playing ? (state.source === 'bundled' ? t.bundled : t.willPlay) : t.none}`),
           playing ? h('div', { key: 'file', style: { fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace', fontSize: '12px', wordBreak: 'break-all' } },
             `${media.name ?? ''}${media.bytes === undefined ? '' : `  ·  ${(media.bytes / 1024 / 1024).toFixed(2)} MB`}`) : null,
+          // The ledger, and the way back out of a spent budget: `once` and `times`
+          // are one-way doors otherwise, reopenable only by editing a file.
+          h('div', { key: 'ledger', style: { marginTop: '8px', display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' } }, [
+            h('span', { key: 'text' },
+              `${t.ledgerLabel}: ${playState.plays > 0 ? `${playState.plays} 次` : t.ledgerNever}`
+              + `${playState.lastPlayedOn === null ? '' : `  ·  ${playState.lastPlayedOn}`}`),
+            button(t.resetLedger, () => void resetCount(), { key: 'reset', disabled: playState.plays === 0 }),
+          ]),
           h('div', { key: 'last', style: { marginTop: '8px' } }, `${t.lastBoot}: ${lastBootLine}`),
         ]),
       ])
@@ -1156,11 +1445,34 @@ window.__ModuleLoader__.load({
           BootAnimation,
         ))
 
+        // The conversation triggers need a watcher, and only those triggers do:
+        // wrapping a service the interface navigates with is not something to do
+        // "just in case". The configuration is read once here; a failed read simply
+        // means no watcher, which is the same as a trigger that never fires.
+        loadConfig().then((loaded) => {
+          const trigger = loaded && loaded.settings ? loaded.settings.trigger : null
+          if (!CONVERSATION_TRIGGERS.has(trigger)) return
+          const report = (occasion) => {
+            claim(occasion).then((answer) => {
+              if (answer !== null && answer.play === true) playStore.request()
+            })
+          }
+          try {
+            // `ctx.effect(callback)` runs the callback now and disposes whatever it
+            // returns when the plugin goes away, which is exactly the lifetime the
+            // wrappers want.
+            if (typeof ctx.effect === 'function') ctx.effect(() => watchConversations(ctx, report))
+            else watchConversations(ctx, report)
+          } catch { /* an unwatched trigger beats a broken plugin */ }
+        })
+
         // Leave a handle for diagnosis, and for the Host's watchdog to reach.
         try {
           globalThis.__DSH_BOOT_ANIMATION_SOUND__ = {
-            version: 1,
+            version: 2,
             releaseCover,
+            claim,
+            playStore,
             config: CONFIG_URL,
           }
         } catch { /* a frozen globalThis is not worth failing a boot over */ }

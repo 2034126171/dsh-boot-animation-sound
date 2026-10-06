@@ -9,6 +9,9 @@
 #     name: dsh-boot-animation-sound
 #     config:
 #       src: D:/videos/boot.mp4
+#       trigger: pageRefresh   # appStart / pageRefresh / newConversation / anySession
+#       frequency: every       # every / daily / once / times
+#       maxPlays: 3            # 仅 frequency: times 时有效
 #       sound: true
 #       volume: 0.9
 #       fit: cover

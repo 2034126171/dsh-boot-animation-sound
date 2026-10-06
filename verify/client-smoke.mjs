@@ -334,7 +334,17 @@ const fakeWindow = {
 }
 
 const postedReports = []
-const configPayload = { version: 1, settings: {}, media: { kind: 'none' }, problem: null, source: null, lastBoot: null }
+const configPayload = {
+  version: 1,
+  settings: {},
+  media: { kind: 'none' },
+  problem: null,
+  source: null,
+  lastBoot: null,
+  pageOccasion: 'appStart',
+  playState: { plays: 0, lastPlayedOn: null },
+  bootId: 'test-boot',
+}
 
 /**
  * Whether the Host's first-paint cover is present, and how old the document is.
@@ -383,12 +393,29 @@ Object.defineProperty(globalThis, 'navigator', {
   configurable: true,
   writable: true,
 })
+/**
+ * What the Host answers to a claim, and what it was asked.
+ *
+ * `claimAnswer` is the Host's verdict for the next claim; the default allows the
+ * play, which is what most scenarios want. `claimCalls` records every occasion the
+ * browser half asked about, so a test can assert WHICH occasion was claimed —
+ * a trigger that claims the wrong one would otherwise look like it worked.
+ */
+const host = {
+  claimAnswer: { ok: true, play: true, reason: null, playState: { plays: 1, lastPlayedOn: null } },
+  claimCalls: [],
+}
+
 Object.defineProperty(globalThis, 'fetch', {
   value: async (url, options) => {
     const target = String(url)
     if (target.includes('/report')) {
       postedReports.push(JSON.parse(String(options?.body ?? '{}')))
       return { ok: true, json: async () => ({ ok: true }) }
+    }
+    if (target.includes('/claim')) {
+      host.claimCalls.push(JSON.parse(String(options?.body ?? '{}')))
+      return { ok: true, json: async () => JSON.parse(JSON.stringify(host.claimAnswer)) }
     }
     if (target.includes('/config.json')) {
       return { ok: true, json: async () => JSON.parse(JSON.stringify(configPayload)) }
@@ -440,7 +467,32 @@ check('the module injects the slots service', Array.isArray(module.inject) && mo
 check('the module exposes apply()', typeof module.apply === 'function')
 
 const registrations = []
+/** A workspace service double, so the conversation watcher has something to wrap. */
+const workspaceCalls = []
+const fakeWorkspace = {
+  startSession(...args) {
+    workspaceCalls.push(['startSession', args])
+    return 'started'
+  },
+  openSession(...args) {
+    workspaceCalls.push(['openSession', args])
+    return 'opened'
+  },
+  connectWorkspace(...args) {
+    workspaceCalls.push(['connectWorkspace', args])
+    return Promise.resolve('s1')
+  },
+}
+const effects = []
 const fakeCtx = {
+  get(name) {
+    return name === 'uiWorkspace' ? fakeWorkspace : undefined
+  },
+  effect(run) {
+    const dispose = run()
+    effects.push(dispose)
+    return () => {}
+  },
   slots: {
     inject(key, run) {
       registrations.push({ key, run })
@@ -462,20 +514,33 @@ const Overlay = overlay.run().component
 const Settings = settings.run().component
 check('both components are functions', typeof Overlay === 'function' && typeof Settings === 'function')
 
-/** @returns the rendered tree for one configuration, with the fake video. */
-async function boot(settingsPatch) {
+/**
+ * @param settingsPatch - settings for this scenario.
+ * @param extras - fields the scenario needs to drive beyond the defaults:
+ *   `pageOccasion` (what the Host reports for this page load) and `claimAnswer`
+ *   (the Host's verdict). They are applied AFTER the defaults, because the
+ *   defaults would otherwise overwrite them — which is exactly the trap this
+ *   helper's shape exists to avoid.
+ * @returns the rendered tree, the renderer and the fake video.
+ */
+async function boot(settingsPatch, extras = {}) {
   pageState.coverPresent = true
   pageState.documentAgeMs = 120
   Object.assign(configPayload, {
-    settings: { enabled: true, sound: true, volume: 0.9, soundOnFirstInput: true, skip: 'button', showFullscreenButton: false, fadeInMs: 0, fadeOutMs: 0, holdAfterEndMs: 0, ...settingsPatch },
-    media: { kind: 'video', url: '/dsh-boot-animation-sound/asset/default2.mp4', name: 'default2.mp4', bytes: 1990488 },
+    settings: { enabled: true, sound: true, volume: 0.9, soundOnFirstInput: true, skip: 'button', showFullscreenButton: false, fadeInMs: 0, fadeOutMs: 0, holdAfterEndMs: 0, trigger: 'pageRefresh', frequency: 'every', maxPlays: 3, ...settingsPatch },
+    media: { kind: 'video', url: '/dsh-boot-animation-sound/asset/视频测试.mp4', name: '视频测试.mp4', bytes: 1990488 },
     problem: null,
     source: 'bundled',
+    pageOccasion: 'appStart',
+    playState: { plays: 0, lastPlayedOn: null },
+    ...(extras.config ?? {}),
   })
   policy.calls.length = 0
   policy.gestureGranted = false
   postedReports.length = 0
   windowListeners.clear()
+  host.claimCalls.length = 0
+  host.claimAnswer = extras.claimAnswer ?? { ok: true, play: true, reason: null, playState: { plays: 1, lastPlayedOn: null } }
   const renderer = createRenderer()
   const dom = createDom()
   const { tree } = await renderer.mount(Overlay, {}, dom)
@@ -649,11 +714,15 @@ console.log('\n[8] the animation belongs to a page LOAD, not to a plugin that ap
   pageState.coverPresent = false
   pageState.documentAgeMs = 600000
   Object.assign(configPayload, {
-    settings: { enabled: true, sound: true, volume: 0.9 },
-    media: { kind: 'video', url: '/dsh-boot-animation-sound/asset/default2.mp4', name: 'default2.mp4' },
+    settings: { enabled: true, sound: true, volume: 0.9, trigger: 'pageRefresh', frequency: 'every' },
+    media: { kind: 'video', url: '/dsh-boot-animation-sound/asset/视频测试.mp4', name: '视频测试.mp4' },
     problem: null,
     source: 'bundled',
+    pageOccasion: 'appStart',
+    playState: { plays: 0, lastPlayedOn: null },
   })
+  host.claimCalls.length = 0
+  host.claimAnswer = { ok: true, play: true, reason: null, playState: { plays: 1, lastPlayedOn: null } }
   policy.calls.length = 0
   const renderer = createRenderer()
   const dom = createDom()
@@ -682,6 +751,89 @@ console.log('\n[8] the animation belongs to a page LOAD, not to a plugin that ap
   const { tree: slowTree } = await slowRenderer.mount(Overlay, {}, slowDom)
   check('a covered page load boots even when it took minutes', slowTree !== null)
   slowRenderer.unmount()
+}
+
+console.log('\n[9] the trigger decides WHICH occasion is claimed')
+{
+  // The Host's own verdict, not a guess made in the browser: a trigger and the
+  // cover decision are computed from the same counters, so they cannot disagree.
+  const { renderer } = await boot({ trigger: 'pageRefresh' })
+  equal('a page-load trigger claims with the occasion the Host reported', host.claimCalls[0]?.occasion, 'appStart')
+  equal('and the play was requested', host.claimCalls.length, 1)
+  renderer.unmount()
+
+  const second = await boot({ trigger: 'appStart' }, { config: { pageOccasion: 'pageRefresh' } })
+  equal('a later page load is claimed with the occasion the Host reported', host.claimCalls[0]?.occasion, 'pageRefresh')
+  second.renderer.unmount()
+
+  // A conversation trigger must claim NOTHING on a page load: the animation is not
+  // for this moment at all.
+  const conversation = await boot({ trigger: 'newConversation' })
+  equal('a conversation trigger claims nothing on a page load', host.claimCalls.length, 0)
+  equal('and it draws nothing yet', conversation.tree, null)
+  equal('and it does not play', policy.calls.length, 0)
+  conversation.renderer.unmount()
+
+  // A refused claim means no animation, and the cover must come off.
+  const denied = await boot({ frequency: 'daily' }, {
+    claimAnswer: { ok: true, play: false, reason: 'daily', playState: { plays: 1, lastPlayedOn: '2026-10-06' } },
+  })
+  equal('a refused claim draws nothing', denied.tree, null)
+  equal('and nothing was played', policy.calls.length, 0)
+  denied.renderer.unmount()
+}
+
+console.log('\n[10] the conversation watcher: wraps navigation, and restores it')
+{
+  host.claimCalls.length = 0
+  host.claimAnswer = { ok: true, play: true, reason: null, playState: { plays: 1, lastPlayedOn: null } }
+
+  // `apply` read the configuration once; the trigger at that time was the default,
+  // so install the watcher directly through the exposed handle instead of guessing
+  // at module state.
+  const handle = globalThis.__DSH_BOOT_ANIMATION_SOUND__
+  check('the diagnosis handle exposes the claim helper', typeof handle?.claim === 'function')
+  check('the diagnosis handle exposes the play signal', typeof handle?.playStore?.request === 'function')
+
+  // The watcher itself, driven exactly as `apply` installs it.
+  const before = { startSession: fakeWorkspace.startSession, openSession: fakeWorkspace.openSession }
+  const workspaceCallsBefore = workspaceCalls.length
+  const dispose = (() => {
+    // Re-create the watcher through the module's own code path by re-applying with
+    // the conversation trigger configured.
+    configPayload.settings = { ...configPayload.settings, trigger: 'newConversation' }
+    const localRegistrations = []
+    const localCtx = {
+      get: (name) => (name === 'uiWorkspace' ? fakeWorkspace : undefined),
+      effect: (run) => {
+        const cleanup = run()
+        effects.push(cleanup)
+        return () => {}
+      },
+      slots: {
+        inject: (key, run) => localRegistrations.push({ key, run }),
+        register: (definition, component) => ({ definition, component }),
+      },
+    }
+    module.apply(localCtx)
+    return () => {}
+  })()
+  void dispose
+
+  // `apply` reads the configuration asynchronously, so give it a turn.
+  await new Promise((resolve) => setTimeout(resolve, 0))
+
+  check('starting a conversation still returns the original result', fakeWorkspace.startSession('w1') === 'started')
+  check('opening a conversation still returns the original result', fakeWorkspace.openSession('s1') === 'opened')
+  check('the original methods really ran', workspaceCalls.length >= workspaceCallsBefore + 2, String(workspaceCalls.length))
+  check('starting a conversation claimed newConversation', host.claimCalls.some((call) => call.occasion === 'newConversation'))
+  check('opening a conversation claimed sessionOpen', host.claimCalls.some((call) => call.occasion === 'sessionOpen'))
+  check('the wrapper is not the original any more', fakeWorkspace.startSession !== before.startSession)
+
+  for (const cleanup of effects.reverse()) {
+    if (typeof cleanup === 'function') cleanup()
+  }
+  check('disposal restores the original methods', fakeWorkspace.startSession === before.startSession && fakeWorkspace.openSession === before.openSession)
 }
 
 for (const id of timers) clearTimeout(id)

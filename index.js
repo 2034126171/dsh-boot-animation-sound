@@ -44,6 +44,7 @@
  */
 
 import { spawn } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { createReadStream, existsSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { homedir, tmpdir } from 'node:os'
 import { extname, isAbsolute, join, resolve, sep } from 'node:path'
@@ -59,12 +60,16 @@ const SAVE_ROUTE = `${ROUTE_BASE}/config`
 const PICK_ROUTE = `${ROUTE_BASE}/pick`
 const REPORT_ROUTE = `${ROUTE_BASE}/report`
 const MEDIA_ROUTE = `${ROUTE_BASE}/asset`
+/** The browser half asks "may I play now?" here, and the Host spends the budget. */
+const CLAIM_ROUTE = `${ROUTE_BASE}/claim`
+/** Reset the play ledger, so a spent "only once" budget is not a dead end. */
+const RESET_ROUTE = `${ROUTE_BASE}/reset`
 
 /** Where this plugin keeps its own state under the DSH home. */
 const STATE_DIRNAME = 'dsh-boot-animation-sound'
 
 /** The clip played when the user has never chosen one. */
-const BUNDLED_MEDIA = join(PACKAGE_DIR, 'media', 'default2.mp4')
+const BUNDLED_MEDIA = join(PACKAGE_DIR, 'media', '视频测试.mp4')
 
 /**
  * Container extensions accepted for the video, mapped to the MIME type a
@@ -158,7 +163,45 @@ export const DEFAULTS = {
    * if the browser half fails to load.
    */
   coverApplication: true,
+  /**
+   * When the animation is allowed to play.
+   *
+   *   `appStart`        the first page load after DSH started
+   *   `pageRefresh`     every page load — the default, and exactly what this
+   *                     plugin did before triggers existed
+   *   `newConversation` a new conversation is started
+   *   `anySession`      a conversation is opened, new or existing
+   *
+   * The occasion is decided in ONE place: a page load is `appStart` or
+   * `pageRefresh` according to the Host's own count of index renders (the Host
+   * loads once per application run, so it knows which page load is the first),
+   * and the conversation occasions are reported by the browser half when it sees
+   * the corresponding UI action.
+   */
+  trigger: 'pageRefresh',
+  /**
+   * How often it may play AT ALL, counted across application runs.
+   *
+   *   `every`  no limit
+   *   `daily`  at most once per local day
+   *   `once`   at most once, ever
+   *   `times`  at most `maxPlays` times, ever
+   *
+   * The ledger lives in the Host's state directory rather than in the browser, so
+   * it survives a page refresh, a second window and a restart. A limit that only
+   * existed in one window would be a limit the user could not trust.
+   */
+  frequency: 'every',
+  /** The budget for `frequency: 'times'`. */
+  maxPlays: 3,
 }
+
+/** Trigger values the Host implements. */
+const TRIGGERS = new Set(['appStart', 'pageRefresh', 'newConversation', 'anySession'])
+/** Frequency values the Host implements. */
+const FREQUENCIES = new Set(['every', 'daily', 'once', 'times'])
+/** Occasions the browser half reports. Each maps onto one or more triggers. */
+const OCCASIONS = new Set(['appStart', 'pageRefresh', 'newConversation', 'sessionOpen'])
 
 const SKIP_MODES = new Set(['button', 'click', 'auto', 'never'])
 const FIT_MODES = new Set(['contain', 'cover', 'fill'])
@@ -209,7 +252,80 @@ export function normalizeConfig(raw) {
     skipAfterMs: clampNumber(input.skipAfterMs, DEFAULTS.skipAfterMs, 0, 60000),
     showFullscreenButton: bool(input.showFullscreenButton, DEFAULTS.showFullscreenButton),
     coverApplication: bool(input.coverApplication, DEFAULTS.coverApplication),
+    trigger: oneOf(input.trigger, TRIGGERS, DEFAULTS.trigger),
+    frequency: oneOf(input.frequency, FREQUENCIES, DEFAULTS.frequency),
+    maxPlays: Math.round(clampNumber(input.maxPlays, DEFAULTS.maxPlays, 1, 1000)),
   }
+}
+
+/**
+ * @returns the local calendar day as `YYYY-MM-DD`.
+ *
+ * Local, not UTC: "once a day" means the user's day. Using the ISO date of a UTC
+ * instant would roll the budget over at an arbitrary hour for anyone east or west
+ * of Greenwich.
+ */
+function today(now = new Date()) {
+  const pad = (value) => String(value).padStart(2, '0')
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+}
+
+/**
+ * Whether a configured trigger accepts this occasion.
+ *
+ * `pageRefresh` accepts the page-load occasions, which includes the first one —
+ * "refresh" reads as "every page load", and that is also what this plugin did
+ * before triggers existed, so the default keeps behaving the same way.
+ *
+ * `anySession` accepts a new conversation too: starting one is opening one.
+ *
+ * @param trigger - the configured trigger.
+ * @param occasion - what just happened.
+ * @returns true when the occasion is one this trigger listens for.
+ */
+export function triggerMatches(trigger, occasion) {
+  switch (trigger) {
+    case 'appStart': return occasion === 'appStart'
+    case 'pageRefresh': return occasion === 'appStart' || occasion === 'pageRefresh'
+    case 'newConversation': return occasion === 'newConversation'
+    case 'anySession': return occasion === 'newConversation' || occasion === 'sessionOpen'
+    default: return false
+  }
+}
+
+/**
+ * Decide whether the animation may play now, WITHOUT consuming anything.
+ *
+ * Split from {@link consumePlay} on purpose: the Host asks this at index-render
+ * time to decide whether to hide the application behind the cover, and the
+ * browser half asks it again to actually claim a play. A read that incremented
+ * the ledger would burn a "only once" budget on a page load whose animation then
+ * never started.
+ *
+ * @param settings - effective settings.
+ * @param media - resolved media descriptor.
+ * @param occasion - what just happened.
+ * @param state - the persisted play ledger.
+ * @returns `{ play, reason }`; `reason` names the setting that refused.
+ */
+export function decidePlay(settings, media, occasion, state, now = new Date()) {
+  if (settings.enabled !== true) return { play: false, reason: 'disabled' }
+  if (media.configured !== true || media.problem !== undefined) return { play: false, reason: 'no-media' }
+  if (!triggerMatches(settings.trigger, occasion)) return { play: false, reason: 'trigger' }
+  switch (settings.frequency) {
+    case 'daily':
+      if (state.lastPlayedOn === today(now)) return { play: false, reason: 'daily' }
+      break
+    case 'once':
+      if (state.plays >= 1) return { play: false, reason: 'once' }
+      break
+    case 'times':
+      if (state.plays >= settings.maxPlays) return { play: false, reason: 'times' }
+      break
+    default:
+      break
+  }
+  return { play: true, reason: null }
 }
 
 /** @returns the lower-case extension of `file`, without the dot. */
@@ -355,6 +471,46 @@ function readBootReport(dshHome) {
   } catch {
     return null
   }
+}
+
+/** The persisted play ledger: how many times, and when last. */
+const EMPTY_PLAY_STATE = { plays: 0, lastPlayedOn: null }
+
+/**
+ * Read the play ledger.
+ *
+ * Kept apart from `settings.json` on purpose: that file is the user's
+ * configuration and this one is a counter the plugin maintains. Mixing them
+ * would mean a settings save rewrote the counter, and a counter reset rewrote
+ * the settings.
+ *
+ * @param dshHome - absolute DSH home directory.
+ * @returns the ledger, always with both fields present and sane.
+ */
+function readPlayState(dshHome) {
+  let raw
+  try {
+    raw = JSON.parse(readFileSync(join(stateDir(dshHome), 'play-state.json'), 'utf8'))
+  } catch {
+    return { ...EMPTY_PLAY_STATE }
+  }
+  const plays = raw !== null && typeof raw === 'object' && Number.isFinite(raw.plays) && raw.plays > 0
+    ? Math.floor(raw.plays)
+    : 0
+  const lastPlayedOn = raw !== null && typeof raw === 'object' && typeof raw.lastPlayedOn === 'string'
+    ? raw.lastPlayedOn
+    : null
+  return { plays, lastPlayedOn }
+}
+
+/**
+ * Write the play ledger.
+ * @param dshHome - absolute DSH home directory.
+ * @param state - the ledger to store.
+ */
+function writePlayState(dshHome, state) {
+  mkdirSync(stateDir(dshHome), { recursive: true })
+  writeFileSync(join(stateDir(dshHome), 'play-state.json'), `${JSON.stringify(state, null, 2)}\n`, 'utf8')
 }
 
 /**
@@ -604,6 +760,22 @@ export function apply(ctx, rawConfig, options = {}) {
   const pick = options.picker ?? ((initial) => pickMediaFile(ctx, initial))
 
   /**
+   * Per-application-run identity, and how many times the index has been served.
+   *
+   * The Host half is mounted once per DSH run, which is exactly what the
+   * `appStart` trigger means: the first index render this instance serves is the
+   * application starting, and every later one is a page refresh. Counting here
+   * rather than in the browser is what lets the cover decision be made BEFORE the
+   * browser half has run — a page load that will not play must not be covered, or
+   * the user sees a black screen for nothing.
+   */
+  const bootId = randomBytes(8).toString('hex')
+  let indexRenders = 0
+
+  /** @returns which page-load occasion the current page load is. */
+  const pageOccasion = () => (indexRenders <= 1 ? 'appStart' : 'pageRefresh')
+
+  /**
    * Effective settings: the profile patch, with the settings page's file on top.
    *
    * Re-read per request rather than cached at mount, so a change made in the
@@ -653,6 +825,11 @@ export function apply(ctx, rawConfig, options = {}) {
     /** True once the user has chosen something, or cleared it on purpose. */
     chosen: media.source === 'chosen' || media.source === 'cleared',
     lastBoot: readBootReport(dshHome),
+    /** The play ledger, so the settings page and the browser half agree on it. */
+    playState: readPlayState(dshHome),
+    /** Which page-load occasion the browser half is looking at, decided here. */
+    pageOccasion: pageOccasion(),
+    bootId,
     ...extra,
   })
 
@@ -664,8 +841,17 @@ export function apply(ctx, rawConfig, options = {}) {
   ctx.on('webserver/index-inject', (table) => {
     try {
       if (!Array.isArray(table)) return
+      // One more page load. Counted for EVERY render, before any early return,
+      // because the count is what makes `appStart` distinguishable from a refresh.
+      indexRenders += 1
       const { effective, media } = resolved()
-      if (!effective.enabled || !playable(media) || !effective.coverApplication) return
+      if (!effective.coverApplication) return
+      // Cover this page load only if the animation is actually going to play on
+      // it. The Host can answer that here because it owns both the occasion
+      // counter and the frequency ledger: covering a page load whose animation has
+      // already spent its budget would show a black screen and then release it,
+      // which is worse than never covering it.
+      if (!decidePlay(effective, media, pageOccasion(), readPlayState(dshHome)).play) return
       const alreadyPresent = table.some((row) => row && row.kind === 'style' && typeof row.text === 'string' && row.text.includes('dsh-boot-animation-sound-cover'))
       if (alreadyPresent) return
 
@@ -760,6 +946,9 @@ export function apply(ctx, rawConfig, options = {}) {
         if (typeof body.enabled === 'boolean') next.enabled = body.enabled
         if (typeof body.skip === 'string') next.skip = normalizeConfig({ skip: body.skip }).skip
         if (typeof body.showFullscreenButton === 'boolean') next.showFullscreenButton = body.showFullscreenButton
+        if (typeof body.trigger === 'string') next.trigger = normalizeConfig({ trigger: body.trigger }).trigger
+        if (typeof body.frequency === 'string') next.frequency = normalizeConfig({ frequency: body.frequency }).frequency
+        if (typeof body.maxPlays === 'number') next.maxPlays = normalizeConfig({ maxPlays: body.maxPlays }).maxPlays
         try {
           writeState(dshHome, next)
         } catch (error) {
@@ -770,6 +959,76 @@ export function apply(ctx, rawConfig, options = {}) {
         }
         const { effective, media } = resolved()
         ctx.logger.info(`dsh-boot-animation-sound: settings saved (sound=${String(effective.sound)}, src=${String(effective.src ?? '')})`)
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+        res.end(JSON.stringify(describe(effective, media, { ok: true })))
+      },
+    }))
+
+    // The browser half asks whether it may play, and this is where a play is
+    // SPENT. One endpoint rather than a rule duplicated in the browser: the ledger
+    // has to be authoritative, and the browser cannot be trusted to count (two
+    // windows would each count their own plays, and a refresh would forget).
+    scoped.effect(() => scoped.webServer.register({
+      kind: 'exact',
+      path: CLAIM_ROUTE,
+      handler: async (req, res) => {
+        if (guard(req, res)) return
+        if (req.method !== 'POST') {
+          res.writeHead(405, { Allow: 'POST' })
+          res.end()
+          return
+        }
+        const body = await readJsonBody(req, 4 * 1024)
+        const occasion = body !== null && typeof body === 'object' && OCCASIONS.has(body.occasion) ? body.occasion : null
+        if (occasion === null) {
+          res.writeHead(400, { 'Content-Type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ ok: false, error: 'invalid-occasion' }))
+          return
+        }
+        const { effective, media } = resolved()
+        const state = readPlayState(dshHome)
+        const verdict = decidePlay(effective, media, occasion, state)
+        let spent = state
+        if (verdict.play) {
+          spent = { plays: state.plays + 1, lastPlayedOn: today() }
+          try {
+            writePlayState(dshHome, spent)
+          } catch (error) {
+            // Refusing to play is the safe failure: playing anyway would mean a
+            // budget that silently does not hold.
+            ctx.logger.warn(`dsh-boot-animation-sound: could not write the play ledger (${error.code ?? error.message})`)
+            res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' })
+            res.end(JSON.stringify({ ok: false, play: false, error: 'write-failed', reason: 'ledger' }))
+            return
+          }
+        }
+        ctx.logger.info(`dsh-boot-animation-sound: claim ${occasion} -> play=${String(verdict.play)}${verdict.reason === null ? '' : ` (${verdict.reason})`}, plays=${String(spent.plays)}`)
+        res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
+        res.end(JSON.stringify({ ok: true, play: verdict.play, reason: verdict.reason, playState: spent }))
+      },
+    }))
+
+    // The way back out of a spent budget. Without this, `frequency: 'once'` is a
+    // one-way door the user can only reopen by editing a file.
+    scoped.effect(() => scoped.webServer.register({
+      kind: 'exact',
+      path: RESET_ROUTE,
+      handler: (req, res) => {
+        if (guard(req, res)) return
+        if (req.method !== 'POST') {
+          res.writeHead(405, { Allow: 'POST' })
+          res.end()
+          return
+        }
+        try {
+          writePlayState(dshHome, { ...EMPTY_PLAY_STATE })
+        } catch (error) {
+          ctx.logger.warn(`dsh-boot-animation-sound: could not reset the play ledger (${error.code ?? error.message})`)
+          res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' })
+          res.end(JSON.stringify({ ok: false, error: 'write-failed' }))
+          return
+        }
+        const { effective, media } = resolved()
         res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' })
         res.end(JSON.stringify(describe(effective, media, { ok: true })))
       },
@@ -855,4 +1114,4 @@ export function apply(ctx, rawConfig, options = {}) {
   })
 }
 
-export { BUNDLED_MEDIA, CONFIG_ROUTE, MEDIA_ROUTE, PICK_ROUTE, REPORT_ROUTE, ROUTE_BASE, SAVE_ROUTE, STATE_DIRNAME }
+export { BUNDLED_MEDIA, CLAIM_ROUTE, CONFIG_ROUTE, MEDIA_ROUTE, PICK_ROUTE, REPORT_ROUTE, RESET_ROUTE, ROUTE_BASE, SAVE_ROUTE, STATE_DIRNAME }
