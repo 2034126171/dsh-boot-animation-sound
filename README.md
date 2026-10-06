@@ -218,4 +218,4 @@ npm run verify
 
 ## 许可
 
-MIT，覆盖插件代码（见 [LICENSE](LICENSE)）。素材例外见上一节。
+MIT，覆盖插件代码（见 [LICENSE](LICENSE)）。示例素材**不在**该授权范围内，详见 [NOTICE](NOTICE)。

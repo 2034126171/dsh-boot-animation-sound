@@ -1,0 +1,22 @@
+# NOTICE
+
+## Licence scope
+
+The MIT licence in [LICENSE](LICENSE) covers the **plugin code** in this
+repository: `index.js`, `client.js`, `cordis.patch.yml`, `verify/*`, and the
+configuration and documentation files.
+
+## Sample media is NOT covered
+
+`media/default2.mp4` is a **sample clip**. It is not authored by this project and
+it is **not** covered by the MIT licence above — no rights to it are granted or
+claimed here. It is bundled so that the plugin plays something out of the box and
+so that the media check in `verify/check-media.mjs` has a clip to verify.
+
+If you fork this repository, or redistribute the package, replace
+`media/default2.mp4` with material you hold the rights to. **No code change is
+needed** — the bundled clip's file name is what the plugin resolves, so replacing
+the file is the whole procedure.
+
+The clip must contain an audio track, otherwise the feature this plugin exists
+for has nothing to play. `npm run verify:media` checks exactly that.

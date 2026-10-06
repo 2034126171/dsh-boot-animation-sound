@@ -21,7 +21,7 @@
 
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const PACKAGE_DIR = fileURLToPath(new URL('..', import.meta.url))
 const CLIENT = readFileSync(join(PACKAGE_DIR, 'client.js'), 'utf8')
@@ -421,7 +421,10 @@ const React = {
 }
 const ReactDOM = { createPortal: (node) => node }
 
-await import(`file:///${join(PACKAGE_DIR, 'client.js').replace(/\\/g, '/')}?smoke=${Date.now()}`)
+// A real file URL, so the suite loads the shipped file on Windows and on the
+// Linux CI runner alike. A hand-assembled `file:///` prefix happens to work on
+// Windows and produces a double slash on POSIX.
+await import(`${pathToFileURL(join(PACKAGE_DIR, 'client.js')).href}?smoke=${Date.now()}`)
 
 console.log('\n[1] the bundle registers the way DSH loads client modules')
 check('window.__ModuleLoader__.load was called', loaderEntry !== null)

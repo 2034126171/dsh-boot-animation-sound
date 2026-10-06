@@ -71,7 +71,8 @@ for (const name of files) {
 check('at least one clip is bundled', files.length > 0, `found ${files.length}`)
 
 console.log('\n[2] the clip the plugin plays by default')
-const name = BUNDLED_MEDIA.slice(BUNDLED_MEDIA.lastIndexOf('\\') + 1)
+// Split on either separator: the suite runs on Windows and on the Linux CI runner.
+const name = BUNDLED_MEDIA.split(/[\\/]/).pop()
 console.log(`  resolves to: ${BUNDLED_MEDIA}`)
 let bundled = null
 try {
