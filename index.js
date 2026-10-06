@@ -40,6 +40,8 @@
  * browser half removes that cover, and a timer in the injected script removes it
  * if the browser half never runs.
  *
+ * Copyright (c) 2026 LSY (个人创作). MIT licensed — see LICENSE.
+ *
  * @module dsh-boot-animation-sound
  */
 

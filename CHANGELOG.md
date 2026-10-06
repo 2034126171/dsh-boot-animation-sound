@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.1
+
+### 版权与署名
+
+- 版权人改为 **LSY（个人创作）**：`LICENSE`、`package.json` 的 `author`、`NOTICE`、README、
+  以及 `index.js` / `client.js` 两个源码文件的文件头都写了同一句。
+- 版权声明按 MIT 原文格式写在 `LICENSE` 里（`Copyright (c) 2026 LSY (个人创作)`），
+  这样 GitHub 仍然识别为 MIT，而不是 `NOASSERTION`。
+- 代码本身没有任何变化；只是署名。
+
 ## 1.1.0
 
 ### 新增：触发时机与播放频率

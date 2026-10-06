@@ -35,6 +35,8 @@
  * and fed to the output, and `fullscreen` records whether anything took the
  * screen.
  *
+ * Copyright (c) 2026 LSY (个人创作). MIT licensed — see LICENSE.
+ *
  * @module dsh-boot-animation-sound/client
  */
 

@@ -6,6 +6,8 @@
 
 纯 JavaScript，没有构建步骤。
 
+> **作者：LSY（个人创作）** · MIT · 版权归 LSY 所有，见 [LICENSE](LICENSE)。
+
 ---
 
 ## 为什么需要它
@@ -269,3 +271,6 @@ npm run verify
 ## 许可
 
 MIT，覆盖插件代码（见 [LICENSE](LICENSE)）。示例素材**不在**该授权范围内，详见 [NOTICE](NOTICE)。
+
+**作者：LSY（个人创作）** —— 版权归 LSY 所有。MIT 授权下你可以自由使用、修改、再分发，但请保留
+[LICENSE](LICENSE) 里的版权声明。

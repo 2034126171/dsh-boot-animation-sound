@@ -1,6 +1,6 @@
 {
   "name": "dsh-boot-animation-sound",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "DSH 开机动画：铺满窗口播放一段视频，声音不需要全屏。触发时机（启动应用/页面刷新/新对话/任意会话）与播放频率（每次/每天一次/只播一次/限播 N 次）都可自选。",
   "keywords": [
     "dsh",
@@ -15,7 +15,7 @@
     "autoplay"
   ],
   "license": "MIT",
-  "author": "2034126171",
+  "author": "LSY (个人创作)",
   "type": "module",
   "main": "./index.js",
   "exports": {
